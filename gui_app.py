@@ -39,6 +39,9 @@ BADGE_RADIUS = 11        # 番号バッジの半径
 BADGE_GAP = 2            # バッジ同士に確保する最小すき間
 BADGE_T_MIN = 0.25       # バッジをずらせる範囲の下限（曲線の媒介変数）
 BADGE_T_MAX = 0.75       # バッジをずらせる範囲の上限
+ARROW_T = 0.8            # 矢じりの位置（進行方向の媒介変数、終点寄り）
+ARROW_LENGTH = 12        # 矢じりの長さ
+ARROW_WIDTH = 9          # 矢じりの幅
 
 
 def index_to_label(index: int) -> str:
@@ -192,6 +195,12 @@ class OneStrokeApp:
                 command=self._on_mode_changed,
             ).pack(anchor="w")
 
+        self.directed_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            panel, text="有向グラフ（矢印）", variable=self.directed_var,
+            command=self._on_directed_toggled,
+        ).pack(anchor="w", pady=(8, 0))
+
         tk.Button(
             panel, text="解答を探索", command=self.on_search,
         ).pack(fill=tk.X, pady=(12, 4))
@@ -208,8 +217,11 @@ class OneStrokeApp:
             "同じ2点間に複数の線も引ける。\n"
             "・削除: 点をクリックでその点と接続線を削除。"
             "線をクリックでその線だけ削除。\n"
+            "・「有向グラフ」をオンにすると線に矢じりが付き、"
+            "1点目→2点目の向きにしか進めない。"
+            "向きを変えたい線は削除して逆順で引き直す。\n"
             "・図形を編集するたびに一筆書きの可否を自動判定し、"
-            "奇数点を赤い縁で表示する。"
+            "問題のある点を赤い縁で表示する。"
         )
         tk.Label(
             panel, text=usage, justify=tk.LEFT, wraplength=180, anchor="w",
@@ -291,6 +303,36 @@ class OneStrokeApp:
             (pa.x, pa.y), ctrl, (pb.x, pb.y), BEZIER_SAMPLES
         )
 
+    def _edge_arrow_geometry(
+        self, edge: Edge
+    ) -> tuple[tuple[float, float], list[float]]:
+        """有向辺の矢じり（三角形）の座標を返す。
+
+        曲線上の進行方向 t≈0.8（終点寄り）に、接線方向を向けて置く。
+        戻り値は (先端座標, create_polygon 用の座標列)。
+        """
+        pts = self._edge_curve_points(edge)
+        if edge.u > edge.v:
+            # サンプル点列はID小→大の順なので、進行方向（u→v）に揃える
+            pts = list(reversed(pts))
+        idx = max(1, round((len(pts) - 1) * ARROW_T))
+        tip_x, tip_y = pts[idx]
+        prev_x, prev_y = pts[idx - 1]
+        dx, dy = tip_x - prev_x, tip_y - prev_y
+        length = math.hypot(dx, dy)
+        if length == 0:
+            dx, dy, length = 1.0, 0.0, 1.0
+        ux, uy = dx / length, dy / length
+        nx, ny = -uy, ux
+        base_x = tip_x - ux * ARROW_LENGTH
+        base_y = tip_y - uy * ARROW_LENGTH
+        coords = [
+            tip_x, tip_y,
+            base_x + nx * ARROW_WIDTH / 2, base_y + ny * ARROW_WIDTH / 2,
+            base_x - nx * ARROW_WIDTH / 2, base_y - ny * ARROW_WIDTH / 2,
+        ]
+        return (tip_x, tip_y), coords
+
     # ------------------------------------------------------------
     # 操作イベント（仕様 8.2）
     # ------------------------------------------------------------
@@ -299,6 +341,12 @@ class OneStrokeApp:
         """モード切替時は線の1点目選択を解除する。"""
         self.selected_point = None
         self._redraw()
+
+    def _on_directed_toggled(self) -> None:
+        """無向/有向モードを切り替える。図形は保持し、解答クリアと再判定のみ。"""
+        self.graph.directed = self.directed_var.get()
+        self.selected_point = None
+        self._on_graph_edited()
 
     def on_canvas_click(self, event: tk.Event) -> None:
         """Canvas クリックを現在のモードに応じて振り分ける。"""
@@ -430,19 +478,29 @@ class OneStrokeApp:
     def _redraw(self) -> None:
         """Canvas 全体を描き直す。線 → 点 → 解答表示の順に重ねる。"""
         self.canvas.delete("all")
-        odd_points = set(self.graph.get_odd_points())
+        # 赤縁で強調する点: 無向=奇数点 / 有向=出入次数が不均衡な点
+        if self.graph.directed:
+            problem_points = {
+                pid for pid, _diff in self.graph.get_unbalanced_points()
+            }
+        else:
+            problem_points = set(self.graph.get_odd_points())
 
         # 線（多重辺はベジェ曲線でオフセット描画）
         for edge in self.graph.edges.values():
             pts = self._edge_curve_points(edge)
             flat = [coord for xy in pts for coord in xy]
             self.canvas.create_line(*flat, fill=COLOR_EDGE, width=3)
+            if self.graph.directed:
+                # 有向辺は進行方向を向いた矢じりで区別する
+                _tip, coords = self._edge_arrow_geometry(edge)
+                self.canvas.create_polygon(*coords, fill=COLOR_EDGE, outline="")
 
-        # 点（奇数点は赤い縁取り、選択中はオレンジ）
+        # 点（問題のある点は赤い縁取り、選択中はオレンジ）
         for point in self.graph.points.values():
             if point.id == self.selected_point:
                 outline, width = COLOR_SELECTED, 4
-            elif point.id in odd_points:
+            elif point.id in problem_points:
                 outline, width = COLOR_ODD_OUTLINE, 3
             else:
                 outline, width = COLOR_POINT_OUTLINE, 2
@@ -474,6 +532,13 @@ class OneStrokeApp:
             (p.x, p.y, POINT_RADIUS + BADGE_RADIUS + 2)
             for p in self.graph.points.values()
         ]
+        if self.graph.directed:
+            # 矢じりの上にバッジが乗らないようにする
+            for eid in path_edges:
+                (tx, ty), _coords = self._edge_arrow_geometry(
+                    self.graph.edges[eid]
+                )
+                obstacles.append((tx, ty, BADGE_RADIUS + ARROW_LENGTH))
         positions = place_badges(curves, obstacles)
         for order, (bx, by) in enumerate(positions, start=1):
             self.canvas.create_oval(
