@@ -58,13 +58,19 @@ class Edge:
 
 
 class Graph:
-    """点と線を管理する無向グラフ（多重辺を許可、自己ループは禁止）。"""
+    """点と線を管理するグラフ（多重辺を許可、自己ループは禁止）。
 
-    def __init__(self) -> None:
+    directed=False（既定）では無向グラフ、True では辺の u→v を
+    向きと解釈する有向グラフとして判定・探索する。
+    """
+
+    def __init__(self, directed: bool = False) -> None:
         self.points: dict[int, Point] = {}
         self.edges: dict[int, Edge] = {}
         # 点ID → 接続する辺IDのリスト
         self.adjacency: dict[int, list[int]] = {}
+        # False=無向 / True=有向（u→v）。切り替えても図形は保持される
+        self.directed: bool = directed
         # 採番用カウンタ。削除後もデクリメントせず、IDを再利用しない
         self._next_point_id: int = 0
         self._next_edge_id: int = 0
@@ -140,6 +146,26 @@ class Graph:
         """次数が奇数の点のIDリストを返す。"""
         return [pid for pid in self.points if self.get_degree(pid) % 2 == 1]
 
+    def get_out_degree(self, pid: int) -> int:
+        """出次数（pid から出る線の本数。u→v の有向解釈）を返す。"""
+        return sum(1 for eid in self.adjacency[pid] if self.edges[eid].u == pid)
+
+    def get_in_degree(self, pid: int) -> int:
+        """入次数（pid へ入る線の本数。u→v の有向解釈）を返す。"""
+        return sum(1 for eid in self.adjacency[pid] if self.edges[eid].v == pid)
+
+    def get_unbalanced_points(self) -> list[tuple[int, int]]:
+        """出次数と入次数が一致しない点の (点ID, 出−入の差) 一覧を返す。
+
+        有向モードの判定・強調表示に使う。
+        """
+        result = []
+        for pid in self.points:
+            diff = self.get_out_degree(pid) - self.get_in_degree(pid)
+            if diff != 0:
+                result.append((pid, diff))
+        return result
+
     def parallel_edges(self, u: int, v: int) -> list[int]:
         """u-v 間の辺IDをID昇順で返す（多重辺の描画オフセット計算用）。"""
         if u not in self.adjacency or v not in self.adjacency:
@@ -174,6 +200,9 @@ class Graph:
     def check_if_drawable(self) -> tuple[bool, str, int | None, int | None]:
         """一筆書きが可能かを判定する。
 
+        無向モードは奇数点の個数、有向モードは出入次数の均衡で判定する。
+        連結判定はどちらのモードでも向きを無視した底グラフに対して行う。
+
         Returns:
             (可否, 理由, 始点ID or None, 終点ID or None) のタプル。
         """
@@ -188,6 +217,8 @@ class Graph:
                 None,
                 None,
             )
+        if self.directed:
+            return self._check_drawable_directed()
         odd = self.get_odd_points()
         # 3. 奇数点0個 → 閉路（どの点から始めても同じ点に戻る）
         if len(odd) == 0:
@@ -220,8 +251,52 @@ class Graph:
             None,
         )
 
+    def _check_drawable_directed(self) -> tuple[bool, str, int | None, int | None]:
+        """有向モードの判定（辺の有無と連結性は確認済みである前提）。
+
+        全点で出次数=入次数なら閉路。「出−入=+1」と「−1」の点が
+        1個ずつなら +1 の点が始点、−1 の点が終点。それ以外は不可能。
+        """
+        unbalanced = self.get_unbalanced_points()
+        # 3. 不均衡点0個 → 閉路
+        if not unbalanced:
+            start = next(
+                pid for pid in self.points if self.get_degree(pid) > 0
+            )
+            return (
+                True,
+                "一筆書き可能です（閉路）。どの点から始めても元の点に戻ります。",
+                start,
+                start,
+            )
+        # 4. +1 と −1 が1個ずつ → その2点が始点・終点
+        plus = [pid for pid, diff in unbalanced if diff == 1]
+        minus = [pid for pid, diff in unbalanced if diff == -1]
+        if len(unbalanced) == 2 and len(plus) == 1 and len(minus) == 1:
+            s, t = plus[0], minus[0]
+            return (
+                True,
+                f"一筆書き可能です。始点 {self.points[s].label}"
+                f" → 終点 {self.points[t].label}（矢印の向きに沿ってなぞる）。",
+                s,
+                t,
+            )
+        # 5. それ以外 → 不可能
+        labels = "、".join(
+            self.points[pid].label for pid, _diff in unbalanced
+        )
+        return (
+            False,
+            f"一筆書きできません。入る線と出る線の本数が合わない点が"
+            f"{len(unbalanced)}個あります（{labels}）。",
+            None,
+            None,
+        )
+
     def find_euler_path(self) -> tuple[list[int], list[int]] | tuple[None, None]:
         """Hierholzer 法（スタックによる反復実装）でオイラー路を求める。
+
+        有向モードでは出辺のみを走査し、矢印の向きに沿った経路を返す。
 
         Returns:
             (点IDの経路列, 辺IDの通過順) のタプル。
@@ -231,6 +306,18 @@ class Graph:
         ok, _reason, start, _end = self.check_if_drawable()
         if not ok:
             return (None, None)
+
+        if self.directed:
+            # 有向モードでは出辺（u が自分の辺）だけを走査する
+            adj_lists: dict[int, list[int]] = {
+                pid: [
+                    eid for eid in self.adjacency[pid]
+                    if self.edges[eid].u == pid
+                ]
+                for pid in self.points
+            }
+        else:
+            adj_lists = self.adjacency
 
         # 各点の隣接リスト走査位置ポインタ。使用済み辺を再走査しない
         ptr: dict[int, int] = {pid: 0 for pid in self.points}
@@ -242,7 +329,7 @@ class Graph:
 
         while stack:
             cur, via = stack[-1]
-            adj = self.adjacency[cur]
+            adj = adj_lists[cur]
             i = ptr[cur]
             # 使用済みの辺を読み飛ばす（枝刈り）
             while i < len(adj) and adj[i] in used:

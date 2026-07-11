@@ -53,6 +53,15 @@ def build_two_triangles() -> Graph:
     return g
 
 
+def build_directed(edge_list: list[tuple[str, str]], labels: str) -> Graph:
+    """有向グラフを作る。edge_list はラベルの (始点, 終点) ペア。"""
+    g = Graph(directed=True)
+    ids = {c: g.add_point(c, 0, 0) for c in labels}
+    for u, v in edge_list:
+        g.add_edge(ids[u], ids[v])
+    return g
+
+
 def build_koenigsberg() -> Graph:
     """ケーニヒスベルクの橋（点4・多重辺を含む線7本）を作る。
 
@@ -91,6 +100,15 @@ class EulerPathAssertions(unittest.TestCase):
                 {edge.u, edge.v},
                 f"{i}番目の辺 {eid} が経路の点と対応していない",
             )
+        # 有向モードでは辺の向き（u→v）どおりに通過していること
+        if g.directed:
+            for i, eid in enumerate(path_edges):
+                edge = g.edges[eid]
+                self.assertEqual(
+                    (path_points[i], path_points[i + 1]),
+                    (edge.u, edge.v),
+                    f"{i}番目の辺 {eid} を向きに逆らって通過している",
+                )
 
 
 class TestGraphEditing(unittest.TestCase):
@@ -309,6 +327,102 @@ class TestFindEulerPath(EulerPathAssertions):
         path_points, path_edges = g.find_euler_path()
         self.assertEqual(len(path_edges), n)
         self.assertEqual(len(path_points), n + 1)
+
+
+class TestDirectedGraph(EulerPathAssertions):
+    """有向グラフモード（directed=True）のテスト。"""
+
+    def test_有向三角形の閉路は可能(self):
+        """観点14: A→B→C→A は全点均衡 → 閉路として可能。"""
+        g = build_directed([("A", "B"), ("B", "C"), ("C", "A")], "ABC")
+        ok, reason, start, end = g.check_if_drawable()
+        self.assertTrue(ok, reason)
+        self.assertEqual(start, end)
+        self.assert_valid_euler_path(g)
+
+    def test_有向パスの始点終点(self):
+        """観点15: A→B→C は +1 の点が始点、−1 の点が終点になる。"""
+        g = build_directed([("A", "B"), ("B", "C")], "ABC")
+        ok, reason, start, end = g.check_if_drawable()
+        self.assertTrue(ok, reason)
+        self.assertEqual(g.points[start].label, "A")
+        self.assertEqual(g.points[end].label, "C")
+        self.assert_valid_euler_path(g)
+
+    def test_合流する2辺は不可能(self):
+        """観点16: A→B, C→B は B に入るだけの点ができ不可能。"""
+        g = build_directed([("A", "B"), ("C", "B")], "ABC")
+        ok, reason, start, end = g.check_if_drawable()
+        self.assertFalse(ok)
+        self.assertIn("合わない", reason)
+        self.assertIsNone(start)
+        self.assertIsNone(end)
+        self.assertEqual(g.find_euler_path(), (None, None))
+
+    def test_一辺だけ逆向きの四角形は不可能(self):
+        """一周の向きが揃っていない閉路（±2の不均衡）は不可能。"""
+        g = build_directed(
+            [("A", "B"), ("B", "C"), ("D", "C"), ("D", "A")], "ABCD"
+        )
+        ok, _, _, _ = g.check_if_drawable()
+        self.assertFalse(ok)
+
+    def test_相互の2辺で閉路(self):
+        """観点17: A→B と B→A は往復の閉路として可能。"""
+        g = build_directed([("A", "B"), ("B", "A")], "AB")
+        ok, reason, start, end = g.check_if_drawable()
+        self.assertTrue(ok, reason)
+        self.assertEqual(start, end)
+        self.assert_valid_euler_path(g)
+
+    def test_共有点を持つ2つの有向閉路(self):
+        """8の字（点Xを共有する向き付き閉路2つ）→ 全点均衡で可能。"""
+        g = build_directed(
+            [("X", "A"), ("A", "X"), ("X", "B"), ("B", "X")], "XAB"
+        )
+        ok, reason, start, end = g.check_if_drawable()
+        self.assertTrue(ok, reason)
+        self.assertEqual(start, end)
+        self.assert_valid_euler_path(g)
+
+    def test_同じ図形でも無向と有向で判定が変わる(self):
+        """観点18: U→V の多重辺2本は無向なら可能、有向では不可能。"""
+        g = Graph()
+        u = g.add_point("U", 0, 0)
+        v = g.add_point("V", 0, 0)
+        g.add_edge(u, v)
+        g.add_edge(u, v)
+        ok_undirected, _, _, _ = g.check_if_drawable()
+        self.assertTrue(ok_undirected)
+        # モードを切り替えても図形は保持されたまま判定だけが変わる
+        g.directed = True
+        ok_directed, _, _, _ = g.check_if_drawable()
+        self.assertFalse(ok_directed)
+        self.assertEqual(g.find_euler_path(), (None, None))
+
+    def test_有向の多重辺で経路が求まる(self):
+        """観点19: 往復2組（計4辺）の有向多重辺で向きどおりの経路。"""
+        g = build_directed(
+            [("U", "V"), ("V", "U"), ("U", "V"), ("V", "U")], "UV"
+        )
+        self.assert_valid_euler_path(g)
+
+    def test_不均衡点の一覧(self):
+        """get_unbalanced_points が (点ID, 出−入の差) を返す。"""
+        g = build_directed([("A", "B"), ("A", "C")], "ABC")
+        unbalanced = dict(g.get_unbalanced_points())
+        ids = {p.label: p.id for p in g.points.values()}
+        self.assertEqual(unbalanced[ids["A"]], 2)
+        self.assertEqual(unbalanced[ids["B"]], -1)
+        self.assertEqual(unbalanced[ids["C"]], -1)
+
+    def test_有向でも連結判定は向きを無視する(self):
+        """観点20: 合流形（A→B, C→B）でも底グラフとしては連結。"""
+        g = build_directed([("A", "B"), ("C", "B")], "ABC")
+        self.assertTrue(g.is_connected())
+        # 理由は「分離」ではなく次数の不均衡になる
+        _, reason, _, _ = g.check_if_drawable()
+        self.assertNotIn("分離", reason)
 
 
 if __name__ == "__main__":
