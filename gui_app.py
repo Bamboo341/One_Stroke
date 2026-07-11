@@ -36,6 +36,9 @@ EDGE_HIT_DIST = 6        # 線のクリック判定距離（曲線から6px）
 EDGE_OFFSET_STEP = 26    # 多重辺の中点間隔（約26px）
 BEZIER_SAMPLES = 24      # 曲線のサンプル分割数
 BADGE_RADIUS = 11        # 番号バッジの半径
+BADGE_GAP = 2            # バッジ同士に確保する最小すき間
+BADGE_T_MIN = 0.25       # バッジをずらせる範囲の下限（曲線の媒介変数）
+BADGE_T_MAX = 0.75       # バッジをずらせる範囲の上限
 
 
 def index_to_label(index: int) -> str:
@@ -63,6 +66,60 @@ def quadratic_bezier_points(
         y = s * s * p0[1] + 2 * s * t * ctrl[1] + t * t * p1[1]
         points.append((x, y))
     return points
+
+
+def place_badges(
+    curves: list[list[tuple[float, float]]],
+    obstacles: list[tuple[float, float, float]],
+) -> list[tuple[float, float]]:
+    """番号バッジの位置を通過順に決め、重なりを避けた座標列を返す。
+
+    基本は各曲線の中点に置き、配置済みバッジや障害物（点の円・矢じり）と
+    重なる場合のみ、その曲線上 t∈[BADGE_T_MIN, BADGE_T_MAX] の範囲を
+    中央に近い順に探して空き位置へずらす（貪欲法）。
+    全候補が衝突する場合は最も重なりの小さい位置を採用する。
+    バッジが自分の線から離れることはない。
+
+    Args:
+        curves: 通過順に並んだ、各辺の曲線サンプル点列
+        obstacles: (x, y, 確保したい距離) のリスト
+    """
+    min_gap = BADGE_RADIUS * 2 + BADGE_GAP
+    placed: list[tuple[float, float]] = []
+    for pts in curves:
+        last = len(pts) - 1
+        mid = last // 2
+        lo = round(last * BADGE_T_MIN)
+        hi = round(last * BADGE_T_MAX)
+        # 中央から外側へ交互に候補を並べる
+        candidates = [mid]
+        for step in range(1, last + 1):
+            if mid - step >= lo:
+                candidates.append(mid - step)
+            if mid + step <= hi:
+                candidates.append(mid + step)
+            if mid - step < lo and mid + step > hi:
+                break
+        best_pos = pts[mid]
+        best_score = -1.0
+        for idx in candidates:
+            x, y = pts[idx]
+            # 最も窮屈な相手との余裕率（1.0以上なら衝突なし）
+            margins = [
+                math.hypot(x - bx, y - by) / min_gap for bx, by in placed
+            ] + [
+                math.hypot(x - ox, y - oy) / max(need, 1.0)
+                for ox, oy, need in obstacles
+            ]
+            score = min(margins) if margins else float("inf")
+            if score >= 1.0:
+                best_pos = (x, y)
+                break
+            if score > best_score:
+                best_score = score
+                best_pos = (x, y)
+        placed.append(best_pos)
+    return placed
 
 
 def point_segment_distance(
@@ -407,10 +464,18 @@ class OneStrokeApp:
         """探索結果を描画する（仕様 8.4）。"""
         path_points, path_edges = self.solution
 
-        # 1. 各線の中点に通過順の番号バッジ（青丸＋白数字、1始まり）
-        for order, eid in enumerate(path_edges, start=1):
-            pts = self._edge_curve_points(self.graph.edges[eid])
-            bx, by = pts[len(pts) // 2]  # 曲線の中点サンプル
+        # 1. 各線に通過順の番号バッジ（青丸＋白数字、1始まり）。
+        #    基本は中点、重なる場合は自分の曲線に沿ってずらす
+        curves = [
+            self._edge_curve_points(self.graph.edges[eid])
+            for eid in path_edges
+        ]
+        obstacles = [
+            (p.x, p.y, POINT_RADIUS + BADGE_RADIUS + 2)
+            for p in self.graph.points.values()
+        ]
+        positions = place_badges(curves, obstacles)
+        for order, (bx, by) in enumerate(positions, start=1):
             self.canvas.create_oval(
                 bx - BADGE_RADIUS, by - BADGE_RADIUS,
                 bx + BADGE_RADIUS, by + BADGE_RADIUS,
